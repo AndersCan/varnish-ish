@@ -1,8 +1,8 @@
 import wcmatch from "wildcard-match";
-import Fastify from "fastify";
-import { Client } from "undici";
+import Fastify, { FastifyReply } from "fastify";
+import { Client, request } from "undici";
 import QuickLRU from "quick-lru";
-import type { FastifyReply } from "fastify";
+import { findFirstEsiInclude } from "./find.mjs";
 
 import { PassThrough, Writable, Readable, pipeline } from "stream";
 
@@ -98,28 +98,22 @@ fastify.route({
 
     fastify.log.info("got match " + url);
 
+    getStream;
+
     const cacheEntry: CacheEntry = {
       statusCode: 0,
       body: [],
       headers: {},
     };
-    // saveToCacheStream.on("data", (data: Buffer) => {
-    //   cacheEntry.body.push(data);
-    //   console.log("saveToCacheStream:", data.toString("utf-8"));
-    // });
 
     const { body, headers, statusCode, trailers } = await foundClient.request({
       path: url,
       method: "GET",
     });
 
-    fastify.log.info(`response received ${statusCode}`);
-    fastify.log.info(headers, "headers");
-    fastify.log.info(typeof headers);
     cacheEntry.statusCode = statusCode;
     cacheEntry.headers = headers;
-    // TODO: Hack max age due shitty code :/
-    const maxAge = Math.max(1000, _getMaxAge((headers || {})["cache-control"]));
+    const maxAge = _getMaxAge((headers || {})["cache-control"]);
     cache.set(cacheKey, cacheEntry, { maxAge });
 
     body.setEncoding("utf8");
@@ -128,38 +122,52 @@ fastify.route({
     reply.code(statusCode).headers(headers).send(htmlResponseStream);
 
     for await (const chunk of body) {
+      const esi = findFirstEsiInclude(chunk);
+
       fastify.log.info(chunk);
+      esi && fastify.log.info(esi, "esi");
       cacheEntry.body.push(chunk);
       htmlResponseStream.write(chunk);
     }
     reply.raw.end();
 
-    // writeable.on("data", (data) => {});
-    // pipeline(body, saveToCacheStream, (err) => {
-    //   if (err) {
-    //     fastify.log.error("this did fail");
-    //     fastify.log.error(err);
-    //   }
-    //   fastify.log.info(cache.get(cacheKey), "cached");
-
-    //   const cacheResult = getCache(cacheKey);
-    //   if (cacheResult) {
-    //     fastify.log.info(cacheResult);
-    //     const stream = Readable.from(cacheResult.body);
-    //     return reply
-    //       .code(cacheResult.statusCode)
-    //       .headers(cacheResult.headers)
-    //       .send(stream);
-    //   } else {
-    //     throw new Error("uhm... this shouldnt happen");
-    //   }
-    // });
-
     return reply;
   },
 });
 
-//<esi:include src="/bar"/>
+async function* getStream(cacheKey: string, url: string) {
+  const cacheEntry: CacheEntry = {
+    statusCode: 0,
+    body: [],
+    headers: {},
+  };
+
+  const { body, headers, statusCode, trailers } = await request(url, {
+    method: "GET",
+  });
+
+  cacheEntry.statusCode = statusCode;
+  cacheEntry.headers = headers;
+  const maxAge = _getMaxAge((headers || {})["cache-control"]);
+  cache.set(cacheKey, cacheEntry, { maxAge });
+
+  body.setEncoding("utf8");
+
+  for await (const chunk of body) {
+    const esi = findFirstEsiInclude(chunk);
+
+    fastify.log.info(chunk);
+    if (esi) {
+      const esiSrc = getEsiSrc(chunk.slice(esi.startOfMatch, esi.endOfMatch));
+      fastify.log.info(esi, "esi: ");
+      fastify.log.info(esiSrc);
+    }
+
+    cacheEntry.body.push(chunk);
+
+    yield chunk;
+  }
+}
 
 // Run the server!
 const start = async () => {
@@ -184,3 +192,33 @@ function _getMaxAge(cacheControl: string | string[] | undefined) {
   const maxAge = RE_MAX_AGE.exec(cacheControl);
   return maxAge && maxAge[1] ? parseInt(maxAge[1], 10) * 1000 : 1000;
 }
+
+function getEsiSrc(esiTag: string) {
+  const src =
+    getDoubleQuotedSrc(esiTag) ||
+    getSingleQuotedSrc(esiTag) ||
+    getUnquotedSrc(esiTag);
+
+  return src;
+}
+
+// Thanks nodesi
+// https://github.com/Schibsted-Tech-Polska/nodesi/blob/88be34f0ef39bc56beaeff98f0e8c776e57f6934/lib/esi.js#L87
+function getBoundedString(open: string, close: string) {
+  return (str) => {
+    const before = str.indexOf(open);
+    let strFragment;
+    let after;
+
+    if (before > -1) {
+      strFragment = str.substr(before + open.length);
+      after = strFragment.indexOf(close);
+      return strFragment.substr(0, after);
+    }
+    return "";
+  };
+}
+
+const getDoubleQuotedSrc = getBoundedString('src="', '"');
+const getSingleQuotedSrc = getBoundedString("src='", "'");
+const getUnquotedSrc = getBoundedString("src=", ">");
