@@ -5,14 +5,11 @@ import { makeRequest } from "./make-request.mjs";
 export async function* consumeEsiStream(chunks: Readable) {
   for await (const chunk of chunks) {
     let esi = findFirstEsiInclude(chunk);
-
     if (esi) {
       const esiTag = chunk.slice(esi.startOfMatch, esi.endOfMatch);
       const esiSrc = getEsiSrc(esiTag);
       const start = chunk.slice(0, esi.startOfMatch);
       const end = chunk.slice(esi.endOfMatch, 0);
-
-      console.log({ start, esiTag, end });
 
       yield start;
       yield `<!-- ${esiTag} -->`;
@@ -21,8 +18,6 @@ export async function* consumeEsiStream(chunks: Readable) {
     } else {
       yield chunk;
     }
-
-    // yield chunk;
   }
 }
 

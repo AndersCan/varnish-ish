@@ -1,11 +1,14 @@
-import wcmatch from "wildcard-match";
 import Fastify, { FastifyReply } from "fastify";
-import { Client, request } from "undici";
-// import QuickLRU from "quick-lru";
-import { findFirstEsiInclude } from "./find.mjs";
+import QuickLRU from "quick-lru";
 import { consumeEsiStream } from "./consume-esi-stream.mjs";
+import { getClient } from "./get-client.mjs";
 
-import { PassThrough, Writable, Readable, pipeline } from "stream";
+import { PassThrough, Readable, pipeline } from "stream";
+interface CacheEntry {
+  statusCode: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: Buffer[];
+}
 
 const fastify = Fastify({
   logger: {
@@ -16,51 +19,23 @@ const fastify = Fastify({
   disableRequestLogging: true,
 });
 
-// URL pattern to host
-// OBS: This can't go via Varnish, BUT that should not matter - Varnish will cache this response
-
-const patterns = [
-  { pattern: ["/foo"], host: "http://localhost:3000" },
-  { pattern: ["/bar"], host: "http://localhost:3000" },
-  {
-    pattern: ["/foobar*", "/foobar*/**/*", "/foobar/**/*"],
-    host: "http://localhost:3000",
+const cache = new QuickLRU<string, CacheEntry>({
+  maxSize: 1000,
+  onEviction(key, value) {
+    fastify.log.info(`evicting ${key}`);
   },
-];
+});
 
-interface CacheEntry {
-  statusCode: number;
-  headers: Record<string, string | string[] | undefined>;
-  body: Buffer[];
-}
-
-// const cache = new QuickLRU<string, CacheEntry>({
-//   maxSize: 1000,
-// });
-
-function getCompiledRoutes() {
-  const isMatchFunctions: Array<(urlPath: string) => Client | undefined> = [];
-
-  for (const { pattern, host } of patterns) {
-    // const ip = await dns.lookup(host);
-    const isMatch = wcmatch(pattern);
-    const client = new Client(host);
-
-    const test = (urlPath: string) => {
-      fastify.log.info(`testing if ${urlPath} matches ${pattern}`);
-      if (isMatch(urlPath)) {
-        return client;
-      }
-      return undefined;
-    };
-
-    isMatchFunctions.push(test);
+// Run the server!
+start();
+async function start() {
+  try {
+    await fastify.listen({ port: 8000 });
+  } catch (err) {
+    fastify.log.error(err);
+    process.exit(1);
   }
-
-  return isMatchFunctions;
 }
-
-const compiledRoutes = getCompiledRoutes();
 
 fastify.route({
   url: "/*",
@@ -70,24 +45,21 @@ fastify.route({
 
     const cacheKey = `${method}:${url}`;
     fastify.log.info(`Request for ${cacheKey}`);
-    // const cacheResult = getCache(cacheKey);
-    // if (cacheResult) {
-    //   fastify.log.info(cacheResult);
-    //   const stream = Readable.from(cacheResult.body);
-    //   return reply
-    //     .code(cacheResult.statusCode)
-    //     .headers(cacheResult.headers)
-    //     .send(stream);
-    // }
-    fastify.log.info(url);
+    const cacheResult = getCache(cacheKey);
+    if (cacheResult) {
+      const body = Readable.from(cacheResult.body);
 
-    let foundClient: Client | undefined = undefined;
-    for (const isMatch of compiledRoutes) {
-      foundClient = isMatch(url);
-      if (foundClient) {
-        break;
-      }
+      return finish(
+        cacheKey,
+        cacheResult.statusCode,
+        cacheResult.headers,
+        false,
+        body,
+        reply
+      );
     }
+
+    let foundClient = getClient(url);
 
     if (!foundClient) {
       return reply
@@ -97,59 +69,80 @@ fastify.route({
         .send(`Sorry, no match for ${url}`);
     }
 
-    fastify.log.info("got match " + url);
-
-    const cacheEntry: CacheEntry = {
-      statusCode: 0,
-      body: [],
-      headers: {},
-    };
-
     const { body, headers, statusCode, trailers } = await foundClient.request({
       path: url,
       method: "GET",
     });
 
+    body.setEncoding("utf8");
+    return finish(cacheKey, statusCode, headers, true, body, reply);
+  },
+});
+
+function finish(
+  cacheKey: string,
+  statusCode: number,
+  headers: CacheEntry["headers"],
+  updateCache: boolean,
+  body: Readable,
+  reply: FastifyReply
+) {
+  // TODO: Specify list of headers to keep
+  delete headers["keep-alive"];
+  // TODO: content-length will cause an eternal spinner in browser
+  delete headers["content-length"];
+
+  const cacheEntry: CacheEntry = {
+    statusCode: 0,
+    body: [],
+    headers: {},
+  };
+  if (updateCache) {
     cacheEntry.statusCode = statusCode;
     cacheEntry.headers = headers;
     const maxAge = _getMaxAge((headers || {})["cache-control"]);
-    // cache.set(cacheKey, cacheEntry, { maxAge });
+    // TODO: The current response may be from the
+    cache.set(cacheKey, cacheEntry, {
+      maxAge,
+    });
+  }
 
-    body.setEncoding("utf8");
+  const cacheResponseStream = new PassThrough({
+    encoding: "utf-8",
+    transform(chunk, encoding, callback) {
+      if (updateCache) {
+        cacheEntry.body.push(chunk);
+      }
 
-    const htmlResponseStream = new PassThrough();
-    delete headers["keep-alive"];
-    // TODO: LOL - content-length will cause an eternal spinner in browser
-    delete headers["content-length"];
-    reply.code(statusCode).headers(headers).send(htmlResponseStream);
+      callback(null, chunk);
+    },
+  });
 
-    pipeline(body, consumeEsiStream, htmlResponseStream, (err) => {
+  const htmlResponseStream = new PassThrough();
+
+  reply.code(statusCode).headers(headers).send(htmlResponseStream);
+
+  pipeline(
+    body,
+    cacheResponseStream,
+    consumeEsiStream,
+    htmlResponseStream,
+    (err) => {
       if (err) {
         fastify.log.error(err, "pipeline failed");
         return;
       }
-      fastify.log.info("pipeline DONE");
+      // TODO: Does this do anything?
       reply.raw.end();
-    });
+    }
+  );
 
-    return reply;
-  },
-});
+  return reply;
+}
 
-// Run the server!
-const start = async () => {
-  try {
-    await fastify.listen({ port: 8000 });
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
-  }
-};
-start();
-
-// function getCache(cacheKey: string) {
-//   return cache.get(cacheKey);
-// }
+function getCache(cacheKey: string) {
+  return cache.get(cacheKey);
+}
 
 function _getMaxAge(cacheControl: string | string[] | undefined) {
   if (typeof cacheControl !== "string") {
@@ -157,5 +150,5 @@ function _getMaxAge(cacheControl: string | string[] | undefined) {
   }
   const RE_MAX_AGE = /max-age=(\d+)/;
   const maxAge = RE_MAX_AGE.exec(cacheControl);
-  return maxAge && maxAge[1] ? parseInt(maxAge[1], 10) * 1000 : 1000;
+  return maxAge && maxAge[1] ? parseInt(maxAge[1], 10) * 1000 : 0;
 }

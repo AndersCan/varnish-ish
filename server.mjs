@@ -8,35 +8,20 @@ function random() {
 }
 // Declare a route
 fastify.get("/", async (request, reply) => {
-  const result = `<html><h1> root </h1></html>`;
+  const result = `<html><h1> root ${random()}</h1><esi:include src="/foo"/></html>`;
   fastify.log.info(request.url);
   return reply
     .type("text/html")
-    .header("Cache-Control", `max-age=5`)
+    .header("Cache-Control", `max-age=${2}`)
     .code(200)
     .send(result);
 });
-
-// // Declare a route
-// fastify.get('/', async (request, reply) => {
-//   return reply
-//   .type('text/html')
-//   .header('Cache-Control', `no-cache`)
-//   .code(200)
-//     .send(`
-//     <html>
-//     <h1> root </h1>
-//     <esi:include src="/foo"/>
-//     <esi:include src="/bar"/>
-//   </html>
-//   `);
-// })
 
 fastify.get("/foo", async (request, reply) => {
   fastify.log.info(request.url);
   return reply
     .type("text/html")
-    .header("Cache-Control", `public, max-age=${5}`)
+    .header("Cache-Control", `public, max-age=${6}`)
     .code(200).send(`<h2> foo ${random()}</h2>
     <esi:include src="/bar"/>`);
 });
@@ -45,7 +30,7 @@ fastify.get("/bar", async (request, reply) => {
   fastify.log.info(request.url);
   return reply
     .type("text/html")
-    .header("Cache-Control", `public, max-age=${5}`)
+    .header("Cache-Control", `public, max-age=${3}`)
     .code(200).send(`<h2> bar ${random()}</h2>
     <esi:include src="/foobar"/>
     `);

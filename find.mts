@@ -15,11 +15,8 @@ export function findFirstEsiInclude(text: string) {
     if (isMatch) {
       index++;
       if (index === endIndex) {
-        console.log("startOfMatch", i);
-        // 11 -
         startOfMatch = i + 1 - endIndex;
         break;
-        // yield full match
       }
     } else {
       index = 0;
@@ -28,8 +25,6 @@ export function findFirstEsiInclude(text: string) {
 
   // do we have a start match?
   if (startOfMatch === -1) {
-    console.log(" we dont");
-
     // no, we dont
     return;
   }
@@ -45,7 +40,6 @@ export function findFirstEsiInclude(text: string) {
     if (isMatch) {
       currentEndIndex++;
       if (endEndIndex === currentEndIndex) {
-        console.log("END MATCH in", text);
         endOfMatch = i;
         return {
           startOfMatch,
