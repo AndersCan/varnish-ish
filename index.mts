@@ -1,8 +1,9 @@
 import wcmatch from "wildcard-match";
 import Fastify, { FastifyReply } from "fastify";
 import { Client, request } from "undici";
-import QuickLRU from "quick-lru";
+// import QuickLRU from "quick-lru";
 import { findFirstEsiInclude } from "./find.mjs";
+import { consumeEsiStream } from "./consume-esi-stream.mjs";
 
 import { PassThrough, Writable, Readable, pipeline } from "stream";
 
@@ -33,9 +34,9 @@ interface CacheEntry {
   body: Buffer[];
 }
 
-const cache = new QuickLRU<string, CacheEntry>({
-  maxSize: 1000,
-});
+// const cache = new QuickLRU<string, CacheEntry>({
+//   maxSize: 1000,
+// });
 
 function getCompiledRoutes() {
   const isMatchFunctions: Array<(urlPath: string) => Client | undefined> = [];
@@ -68,16 +69,16 @@ fastify.route({
     const { url, method } = request;
 
     const cacheKey = `${method}:${url}`;
-
-    const cacheResult = getCache(cacheKey);
-    if (cacheResult) {
-      fastify.log.info(cacheResult);
-      const stream = Readable.from(cacheResult.body);
-      return reply
-        .code(cacheResult.statusCode)
-        .headers(cacheResult.headers)
-        .send(stream);
-    }
+    fastify.log.info(`Request for ${cacheKey}`);
+    // const cacheResult = getCache(cacheKey);
+    // if (cacheResult) {
+    //   fastify.log.info(cacheResult);
+    //   const stream = Readable.from(cacheResult.body);
+    //   return reply
+    //     .code(cacheResult.statusCode)
+    //     .headers(cacheResult.headers)
+    //     .send(stream);
+    // }
     fastify.log.info(url);
 
     let foundClient: Client | undefined = undefined;
@@ -98,8 +99,6 @@ fastify.route({
 
     fastify.log.info("got match " + url);
 
-    getStream;
-
     const cacheEntry: CacheEntry = {
       statusCode: 0,
       body: [],
@@ -114,60 +113,28 @@ fastify.route({
     cacheEntry.statusCode = statusCode;
     cacheEntry.headers = headers;
     const maxAge = _getMaxAge((headers || {})["cache-control"]);
-    cache.set(cacheKey, cacheEntry, { maxAge });
+    // cache.set(cacheKey, cacheEntry, { maxAge });
 
     body.setEncoding("utf8");
 
     const htmlResponseStream = new PassThrough();
+    delete headers["keep-alive"];
+    // TODO: LOL - content-length will cause an eternal spinner in browser
+    delete headers["content-length"];
     reply.code(statusCode).headers(headers).send(htmlResponseStream);
 
-    for await (const chunk of body) {
-      const esi = findFirstEsiInclude(chunk);
-
-      fastify.log.info(chunk);
-      esi && fastify.log.info(esi, "esi");
-      cacheEntry.body.push(chunk);
-      htmlResponseStream.write(chunk);
-    }
-    reply.raw.end();
+    pipeline(body, consumeEsiStream, htmlResponseStream, (err) => {
+      if (err) {
+        fastify.log.error(err, "pipeline failed");
+        return;
+      }
+      fastify.log.info("pipeline DONE");
+      reply.raw.end();
+    });
 
     return reply;
   },
 });
-
-async function* getStream(cacheKey: string, url: string) {
-  const cacheEntry: CacheEntry = {
-    statusCode: 0,
-    body: [],
-    headers: {},
-  };
-
-  const { body, headers, statusCode, trailers } = await request(url, {
-    method: "GET",
-  });
-
-  cacheEntry.statusCode = statusCode;
-  cacheEntry.headers = headers;
-  const maxAge = _getMaxAge((headers || {})["cache-control"]);
-  cache.set(cacheKey, cacheEntry, { maxAge });
-
-  body.setEncoding("utf8");
-
-  for await (const chunk of body) {
-    const esi = findFirstEsiInclude(chunk);
-
-    fastify.log.info(chunk);
-    if (esi) {
-      const esiSrc = getEsiSrc(chunk.slice(esi.startOfMatch, esi.endOfMatch));
-      fastify.log.info(esi, "esi: ");
-      fastify.log.info(esiSrc);
-    }
-
-    cacheEntry.body.push(chunk);
-
-    yield chunk;
-  }
-}
 
 // Run the server!
 const start = async () => {
@@ -180,9 +147,9 @@ const start = async () => {
 };
 start();
 
-function getCache(cacheKey: string) {
-  return cache.get(cacheKey);
-}
+// function getCache(cacheKey: string) {
+//   return cache.get(cacheKey);
+// }
 
 function _getMaxAge(cacheControl: string | string[] | undefined) {
   if (typeof cacheControl !== "string") {
@@ -192,33 +159,3 @@ function _getMaxAge(cacheControl: string | string[] | undefined) {
   const maxAge = RE_MAX_AGE.exec(cacheControl);
   return maxAge && maxAge[1] ? parseInt(maxAge[1], 10) * 1000 : 1000;
 }
-
-function getEsiSrc(esiTag: string) {
-  const src =
-    getDoubleQuotedSrc(esiTag) ||
-    getSingleQuotedSrc(esiTag) ||
-    getUnquotedSrc(esiTag);
-
-  return src;
-}
-
-// Thanks nodesi
-// https://github.com/Schibsted-Tech-Polska/nodesi/blob/88be34f0ef39bc56beaeff98f0e8c776e57f6934/lib/esi.js#L87
-function getBoundedString(open: string, close: string) {
-  return (str) => {
-    const before = str.indexOf(open);
-    let strFragment;
-    let after;
-
-    if (before > -1) {
-      strFragment = str.substr(before + open.length);
-      after = strFragment.indexOf(close);
-      return strFragment.substr(0, after);
-    }
-    return "";
-  };
-}
-
-const getDoubleQuotedSrc = getBoundedString('src="', '"');
-const getSingleQuotedSrc = getBoundedString("src='", "'");
-const getUnquotedSrc = getBoundedString("src=", ">");

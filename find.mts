@@ -1,3 +1,5 @@
+import { deepEqual } from "node:assert/strict";
+
 export function findFirstEsiInclude(text: string) {
   // looking for: <esi:include src="http://example.com/1.html" />
 
@@ -13,7 +15,9 @@ export function findFirstEsiInclude(text: string) {
     if (isMatch) {
       index++;
       if (index === endIndex) {
-        startOfMatch = i;
+        console.log("startOfMatch", i);
+        // 11 -
+        startOfMatch = i + 1 - endIndex;
         break;
         // yield full match
       }
@@ -24,6 +28,8 @@ export function findFirstEsiInclude(text: string) {
 
   // do we have a start match?
   if (startOfMatch === -1) {
+    console.log(" we dont");
+
     // no, we dont
     return;
   }
@@ -58,7 +64,12 @@ export function findFirstEsiInclude(text: string) {
   return;
 }
 
-// console.log(findFirstEsiInclude("<esi:include />"));
-// console.log(findFirstEsiInclude(`<esi:include src="www.host.com" />`));
-// console.log(findFirstEsiInclude("<esi:include this is invalid :/"));
-// console.log(findFirstEsiInclude("<esi:include this is,kinda, invalid ://>"));
+deepEqual(findFirstEsiInclude("<esi:include />"), {
+  startOfMatch: 0,
+  endOfMatch: 14,
+});
+
+deepEqual(findFirstEsiInclude("01234 <esi:include />"), {
+  startOfMatch: 0 + 6,
+  endOfMatch: 14 + 6,
+});

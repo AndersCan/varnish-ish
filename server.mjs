@@ -37,8 +37,8 @@ fastify.get("/foo", async (request, reply) => {
   return reply
     .type("text/html")
     .header("Cache-Control", `public, max-age=${5}`)
-    .code(200)
-    .send(`<h2> foo ${random()}</h2>`);
+    .code(200).send(`<h2> foo ${random()}</h2>
+    <esi:include src="/bar"/>`);
 });
 
 fastify.get("/bar", async (request, reply) => {
